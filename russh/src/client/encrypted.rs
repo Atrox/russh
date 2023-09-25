@@ -20,7 +20,7 @@ use russh_cryptovec::CryptoVec;
 use russh_keys::encoding::{Encoding, Reader};
 use russh_keys::key::parse_public_key;
 
-use crate::client::{Handler, Msg, Prompt, Reply, Session};
+use crate::client::{AuthStatus, Handler, Msg, Prompt, Reply, Session};
 use crate::key::PubKey;
 use crate::negotiation::{Named, Select};
 use crate::parsing::{ChannelOpenConfirmation, ChannelType, OpenChannelMessage};
@@ -207,7 +207,7 @@ impl Session {
                     if buf.first() == Some(&msg::USERAUTH_SUCCESS) {
                         debug!("userauth_success");
                         self.sender
-                            .send(Reply::AuthSuccess)
+                            .send(Reply::AuthStatus(AuthStatus::Success))
                             .map_err(|_| crate::Error::SendError)?;
                         enc.state = EncryptedState::InitCompression;
                         enc.server_compression.init_decompress(&mut enc.decompress);
@@ -239,7 +239,9 @@ impl Session {
                         let no_more_methods = auth_request.methods.is_empty();
                         self.common.auth_method = None;
                         self.sender
-                            .send(Reply::AuthFailure)
+                            .send(Reply::AuthStatus(AuthStatus::Failure {
+                                authentication_methods: auth_request.methods,
+                            }))
                             .map_err(|_| crate::Error::SendError)?;
 
                         // If no other authentication method is allowed by the server, give up.
