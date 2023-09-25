@@ -106,7 +106,7 @@ use crate::ssh_read::SshRead;
 use crate::sshbuffer::{SSHBuffer, SshId};
 use crate::{
     auth, msg, negotiation, strict_kex_violation, ChannelId, ChannelOpenFailure, Disconnect,
-    Limits, Sig,
+    Limits, MethodSet, Sig,
 };
 
 mod encrypted;
@@ -141,8 +141,7 @@ impl Drop for Session {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 enum Reply {
-    AuthSuccess,
-    AuthFailure,
+    AuthStatus(AuthStatus),
     ChannelOpenFailure,
     SignRequest {
         key: key::PublicKey,
@@ -153,6 +152,12 @@ enum Reply {
         instructions: String,
         prompts: Vec<Prompt>,
     },
+}
+
+#[derive(Debug)]
+pub enum AuthStatus {
+    Success,
+    Failure { authentication_methods: MethodSet },
 }
 
 #[derive(Debug)]
@@ -215,8 +220,7 @@ impl From<(ChannelId, ChannelMsg)> for Msg {
 
 #[derive(Debug)]
 pub enum KeyboardInteractiveAuthResponse {
-    Success,
-    Failure,
+    AuthStatus(AuthStatus),
     InfoRequest {
         name: String,
         instructions: String,
@@ -254,7 +258,7 @@ impl<H: Handler> Handle<H> {
     pub async fn authenticate_none<U: Into<String>>(
         &mut self,
         user: U,
-    ) -> Result<bool, crate::Error> {
+    ) -> Result<AuthStatus, crate::Error> {
         let user = user.into();
         self.sender
             .send(Msg::Authenticate {
@@ -271,7 +275,7 @@ impl<H: Handler> Handle<H> {
         &mut self,
         user: U,
         password: P,
-    ) -> Result<bool, crate::Error> {
+    ) -> Result<AuthStatus, crate::Error> {
         let user = user.into();
         self.sender
             .send(Msg::Authenticate {
@@ -330,8 +334,9 @@ impl<H: Handler> Handle<H> {
     ) -> Result<KeyboardInteractiveAuthResponse, crate::Error> {
         loop {
             match self.receiver.recv().await {
-                Some(Reply::AuthSuccess) => return Ok(KeyboardInteractiveAuthResponse::Success),
-                Some(Reply::AuthFailure) => return Ok(KeyboardInteractiveAuthResponse::Failure),
+                Some(Reply::AuthStatus(status)) => {
+                    return Ok(KeyboardInteractiveAuthResponse::AuthStatus(status));
+                }
                 Some(Reply::AuthInfoRequest {
                     name,
                     instructions,
@@ -348,12 +353,15 @@ impl<H: Handler> Handle<H> {
         }
     }
 
-    async fn wait_recv_reply(&mut self) -> Result<bool, crate::Error> {
+    async fn wait_recv_reply(&mut self) -> Result<AuthStatus, crate::Error> {
         loop {
             match self.receiver.recv().await {
-                Some(Reply::AuthSuccess) => return Ok(true),
-                Some(Reply::AuthFailure) => return Ok(false),
-                None => return Ok(false),
+                Some(Reply::AuthStatus(status)) => return Ok(status),
+                None => {
+                    return Ok(AuthStatus::Failure {
+                        authentication_methods: MethodSet::empty(),
+                    })
+                }
                 _ => {}
             }
         }
@@ -364,7 +372,7 @@ impl<H: Handler> Handle<H> {
         &mut self,
         user: U,
         key: Arc<key::KeyPair>,
-    ) -> Result<bool, crate::Error> {
+    ) -> Result<AuthStatus, crate::Error> {
         let user = user.into();
         self.sender
             .send(Msg::Authenticate {
@@ -385,7 +393,7 @@ impl<H: Handler> Handle<H> {
         user: U,
         key: key::PublicKey,
         mut future: S,
-    ) -> (S, Result<bool, S::Error>) {
+    ) -> (S, Result<AuthStatus, S::Error>) {
         let user = user.into();
         if self
             .sender
@@ -401,8 +409,7 @@ impl<H: Handler> Handle<H> {
         loop {
             let reply = self.receiver.recv().await;
             match reply {
-                Some(Reply::AuthSuccess) => return (future, Ok(true)),
-                Some(Reply::AuthFailure) => return (future, Ok(false)),
+                Some(Reply::AuthStatus(status)) => return (future, Ok(status)),
                 Some(Reply::SignRequest { key, data }) => {
                     let (f, data) = future.auth_publickey_sign(&key, data).await;
                     future = f;
@@ -414,7 +421,14 @@ impl<H: Handler> Handle<H> {
                         return (future, Err((crate::SendError {}).into()));
                     }
                 }
-                None => return (future, Ok(false)),
+                None => {
+                    return (
+                        future,
+                        Ok(AuthStatus::Failure {
+                            authentication_methods: MethodSet::empty(),
+                        }),
+                    )
+                }
                 _ => {}
             }
         }
