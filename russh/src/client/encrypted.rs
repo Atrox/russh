@@ -830,7 +830,20 @@ impl Session {
         let mut is_waiting = false;
         if let Some(ref mut enc) = self.common.encrypted {
             is_waiting = match enc.state {
-                EncryptedState::WaitingAuthRequest(_) => true,
+                EncryptedState::WaitingAuthRequest(ref mut auth_request) => {
+                    match meth {
+                        auth::Method::KeyboardInteractive { ref submethods } => {
+                            auth_request.current =
+                                Some(auth::CurrentRequest::KeyboardInteractive {
+                                    submethods: submethods.clone(),
+                                });
+                        }
+
+                        _ => {}
+                    }
+
+                    true
+                }
                 EncryptedState::WaitingAuthServiceRequest {
                     accepted,
                     ref mut sent,
